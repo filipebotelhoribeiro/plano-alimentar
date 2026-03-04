@@ -195,6 +195,14 @@ canvas#weightChart { width:100%; display:block; }
       <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">Toca nas gotas para registar</div>
     </div>
     <div id="mealCards"></div>
+
+    <div class="card" style="margin-top:4px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+        <span style="font-size:14px;font-weight:500;">Nota do dia</span>
+        <span style="font-size:10px;color:var(--text-muted);letter-spacing:0.06em;text-transform:uppercase;">Livre</span>
+      </div>
+      <textarea class="notes-input" id="dailyNote" rows="3" placeholder="Como foi o dia? Exercício, bem-estar, desvios ao plano, contexto..." onchange="saveDailyNote(this.value)"></textarea>
+    </div>
   </div>
 
   <!-- PLANO -->
@@ -264,6 +272,17 @@ canvas#weightChart { width:100%; display:block; }
       </div>
     </div>
     <div style="margin-top:28px;">
+      <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.07em;margin-bottom:10px;">Exportar dados</div>
+      <div class="card">
+        <div style="font-size:13px;color:var(--text-soft);line-height:1.6;margin-bottom:14px;">Exporta o histórico completo — JSON para trazer ao Claude, CSV para a nutricionista abrir no Excel.</div>
+        <div style="display:flex;gap:10px;">
+          <button class="btn-primary" style="flex:1;background:var(--surface2);color:var(--text-soft);border:1px solid var(--border);" onclick="exportJSON()">↓ JSON</button>
+          <button class="btn-primary" style="flex:1;" onclick="exportCSV()">↓ CSV</button>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top:20px;">
       <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.07em;margin-bottom:10px;">Informação</div>
       <div class="card">
         <div class="about-row"><span class="about-key">Nutricionista</span><span class="about-val">Dr.ª Ana Bravo</span></div>
@@ -366,7 +385,7 @@ function dbPut(s,v)    { return new Promise((r,j)=>{ const q=db.transaction(s,'r
 function dbGetAll(s)   { return new Promise((r,j)=>{ const q=db.transaction(s,'readonly').objectStore(s).getAll(); q.onsuccess=()=>r(q.result); q.onerror=()=>j(q.error); }); }
 
 let dayData = { date:todayKey(), meals:{}, water:0, notes:{} };
-async function loadToday() { const s=await dbGet('days',todayKey()); dayData=s||{date:todayKey(),meals:{},water:0,notes:{}}; }
+async function loadToday() { const s=await dbGet('days',todayKey()); dayData=s||{date:todayKey(),meals:{},water:0,notes:{},dailyNote:''}; }
 async function persistDay() { await dbPut('days', dayData); }
 
 let toastTimer;
@@ -620,10 +639,65 @@ function registerSW() {
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').then(()=>setTimeout(scheduleNotifications,1000)).catch(e=>console.log(e));
 }
 
+// ── DAILY NOTE ────────────────────────────────────────────────────────────────
+function renderDailyNote() {
+  const el = document.getElementById('dailyNote');
+  if (el) el.value = dayData.dailyNote || '';
+}
+async function saveDailyNote(val) {
+  dayData.dailyNote = val;
+  await persistDay();
+}
+
+// ── EXPORT ────────────────────────────────────────────────────────────────────
+function triggerDownload(content, filename, mime) {
+  const blob = new Blob([content], { type: mime });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url; a.download = filename; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function exportJSON() {
+  const days    = await dbGetAll('days');
+  const weights = await dbGetAll('weights');
+  const payload = {
+    exportDate: new Date().toISOString(),
+    profile: { name:'Filipe', startWeight:89.3, goalWeight:71.6, inbodyDate:'2026-03-03' },
+    days: days.sort((a,b) => a.date.localeCompare(b.date)),
+    weights: weights.sort((a,b) => new Date(a.date)-new Date(b.date))
+  };
+  triggerDownload(JSON.stringify(payload, null, 2), `plano-filipe-${todayKey()}.json`, 'application/json');
+  showToast('JSON exportado ✓');
+}
+
+async function exportCSV() {
+  const days    = await dbGetAll('days');
+  const weights = await dbGetAll('weights');
+  const wMap    = {};
+  weights.forEach(w => { const d=new Date(w.date); const k=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; wMap[k]=w.value; });
+
+  const mealIds   = MEALS.map(m => m.id);
+  const mealNames = MEALS.map(m => m.name);
+  const header = ['Data','Peso (kg)', ...mealNames, 'Copos de água', 'Nota do dia', ...mealNames.map(n=>`Notas — ${n}`)].join(',');
+
+  const rows = days.sort((a,b)=>a.date.localeCompare(b.date)).map(d => {
+    const peso  = wMap[d.date] || '';
+    const meals = mealIds.map(id => { const s=(d.meals||{})[id]; return s==='yes'?'Sim':s==='no'?'Não':''; });
+    const agua  = d.water || 0;
+    const nota  = `"${(d.dailyNote||'').replace(/"/g,'""')}"`;
+    const notasR= mealIds.map(id => `"${((d.notes||{})[id]||'').replace(/"/g,'""')}"`);
+    return [d.date, peso, ...meals, agua, nota, ...notasR].join(',');
+  });
+
+  triggerDownload([header, ...rows].join('\n'), `plano-filipe-${todayKey()}.csv`, 'text/csv;charset=utf-8;');
+  showToast('CSV exportado ✓');
+}
+
 // ── INIT ──────────────────────────────────────────────────────────────────────
 async function init() {
   await openDB(); await loadToday();
-  renderHeader(); renderWater(); renderMealCards(); renderPlano();
+  renderHeader(); renderWater(); renderMealCards(); renderPlano(); renderDailyNote();
   await updateSummary(); registerSW();
 }
 init();
