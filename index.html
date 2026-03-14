@@ -159,6 +159,22 @@ canvas#weightChart { width:100%; display:block; }
 
 .divider { height:1px; background:var(--border); margin:10px 0; }
 
+/* PAST DAY BANNER */
+.past-banner {
+  display:none; align-items:center; justify-content:space-between;
+  background:rgba(196,105,74,0.08); border:1px solid rgba(196,105,74,0.22);
+  border-radius:var(--radius-sm); padding:10px 14px; margin-bottom:16px; gap:10px;
+}
+.past-banner.visible { display:flex; }
+.past-banner-text { font-size:13px; color:var(--text-soft); }
+.past-banner-text strong { color:var(--accent); font-weight:500; }
+.btn-today {
+  background:var(--accent); color:#fff; border:none; border-radius:var(--radius-sm);
+  padding:6px 14px; font-size:12px; font-family:'DM Sans',sans-serif;
+  font-weight:500; cursor:pointer; white-space:nowrap; transition:opacity 0.2s;
+}
+.btn-today:active { opacity:0.8; }
+
 .toast { position:fixed; bottom:82px; left:50%; transform:translateX(-50%); background:var(--surface2); border:1px solid var(--border); color:var(--text-soft); font-size:13px; padding:8px 20px; border-radius:99px; z-index:200; opacity:0; transition:opacity 0.3s; pointer-events:none; white-space:nowrap; }
 .toast.show { opacity:1; }
 
@@ -179,8 +195,12 @@ canvas#weightChart { width:100%; display:block; }
 
 <div class="content">
 
-  <!-- HOJE -->
+  <!-- HOJE / DIA -->
   <div class="page active" id="page-hoje">
+    <div class="past-banner" id="pastBanner">
+      <span class="past-banner-text">A editar <strong id="pastBannerDate"></strong></span>
+      <button class="btn-today" onclick="goToToday()">← Hoje</button>
+    </div>
     <div class="summary-strip">
       <div class="strip-card"><span class="strip-value" id="mealsCount">0/5</span><span class="strip-label">Refeições</span></div>
       <div class="strip-card"><span class="strip-value" id="waterCount">0</span><span class="strip-label">Copos água</span></div>
@@ -384,9 +404,16 @@ function dbGet(s,k)    { return new Promise((r,j)=>{ const q=db.transaction(s,'r
 function dbPut(s,v)    { return new Promise((r,j)=>{ const q=db.transaction(s,'readwrite').objectStore(s).put(v); q.onsuccess=()=>r(q.result); q.onerror=()=>j(q.error); }); }
 function dbGetAll(s)   { return new Promise((r,j)=>{ const q=db.transaction(s,'readonly').objectStore(s).getAll(); q.onsuccess=()=>r(q.result); q.onerror=()=>j(q.error); }); }
 
-let dayData = { date:todayKey(), meals:{}, water:0, notes:{} };
-async function loadToday() { const s=await dbGet('days',todayKey()); dayData=s||{date:todayKey(),meals:{},water:0,notes:{},dailyNote:''}; }
-async function persistDay() { await dbPut('days', dayData); }
+let dayData = { date:todayKey(), meals:{}, water:0, notes:{}, dailyNote:'' };
+let activeDayKey = todayKey();
+
+async function loadDay(key) {
+  activeDayKey = key;
+  const s = await dbGet('days', key);
+  dayData = s || { date:key, meals:{}, water:0, notes:{}, dailyNote:'' };
+}
+async function loadToday() { await loadDay(todayKey()); }
+async function persistDay() { dayData.date = activeDayKey; await dbPut('days', dayData); }
 
 let toastTimer;
 function showToast(msg) {
@@ -398,6 +425,27 @@ function showToast(msg) {
 function renderHeader() {
   document.getElementById('headerDate').textContent = new Date().toLocaleDateString('pt-PT',{weekday:'short',day:'numeric',month:'short'});
   setGreeting();
+}
+
+function updateDayContext() {
+  const isToday = activeDayKey === todayKey();
+  const banner  = document.getElementById('pastBanner');
+  if (isToday) {
+    banner.classList.remove('visible');
+  } else {
+    banner.classList.add('visible');
+    document.getElementById('pastBannerDate').textContent = fmtKey(activeDayKey);
+  }
+  // Hide streak when editing a past day — it's always about today
+  const streakCard = document.getElementById('streakCount').closest('.strip-card');
+  streakCard.style.opacity = isToday ? '1' : '0.35';
+}
+
+async function goToToday() {
+  await loadDay(todayKey());
+  updateDayContext();
+  renderWater(); renderMealCards(); renderDailyNote();
+  await updateSummary();
 }
 
 function renderWater() {
@@ -443,7 +491,9 @@ async function updateSummary() {
   const done=Object.values(dayData.meals).filter(v=>v==='yes').length;
   document.getElementById('mealsCount').textContent=`${done}/5`;
   document.getElementById('waterCount').textContent=dayData.water;
-  document.getElementById('streakCount').textContent=await calcStreak();
+  if (activeDayKey === todayKey()) {
+    document.getElementById('streakCount').textContent=await calcStreak();
+  }
 }
 async function calcStreak() {
   let s=0; const today=new Date();
@@ -499,7 +549,20 @@ async function renderCal() {
     if (key===calSelected) div.classList.add('selected');
     if (data&&done>0)     div.classList.add('has-data');
     if (data&&done>=4)    div.classList.add('full-day');
-    div.onclick=()=>{ calSelected=key; renderCal(); showDayDetail(key,data||null); };
+    div.onclick=async()=>{
+      calSelected=key; renderCal();
+      // Open day in edit mode
+      await loadDay(key);
+      updateDayContext();
+      renderWater(); renderMealCards(); renderDailyNote();
+      await updateSummary();
+      // Switch to Hoje tab
+      document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+      document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
+      document.getElementById('page-hoje').classList.add('active');
+      document.querySelector('.nav-btn[onclick*="hoje"]').classList.add('active');
+      window.scrollTo(0,0);
+    };
     grid.appendChild(div);
   }
   if (calSelected) {
@@ -698,6 +761,7 @@ async function exportCSV() {
 async function init() {
   await openDB(); await loadToday();
   renderHeader(); renderWater(); renderMealCards(); renderPlano(); renderDailyNote();
+  updateDayContext();
   await updateSummary(); registerSW();
 }
 init();
